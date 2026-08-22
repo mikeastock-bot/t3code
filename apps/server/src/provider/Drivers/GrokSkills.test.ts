@@ -1,13 +1,50 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { discoverGrokSkills, parseGrokInspectSkills } from "./GrokSkills.ts";
 
 const inspectPayload = (skills: ReadonlyArray<unknown>) => JSON.stringify({ skills });
+
+const makeSpawnHandle = (input: {
+  readonly stdout?: string;
+  readonly stderr?: string;
+  readonly exitCode?: number;
+}) =>
+  ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(input.exitCode ?? 0)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.encodeText(input.stdout ? Stream.make(input.stdout) : Stream.empty),
+    stderr: Stream.encodeText(input.stderr ? Stream.make(input.stderr) : Stream.empty),
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+
+const makeNeverFinishingSpawnHandle = () =>
+  ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Effect.never,
+    isRunning: Effect.succeed(true),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.empty,
+    stderr: Stream.empty,
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
 
 describe("parseGrokInspectSkills", () => {
   it("maps inspect entries onto provider skills, sorted by name", () => {
@@ -200,27 +237,13 @@ describe("discoverGrokSkills", () => {
     const spawner = ChildProcessSpawner.make((command) => {
       spawnCwds.push(command._tag === "StandardCommand" ? command.options.cwd : undefined);
       return Effect.succeed(
-        ChildProcessSpawner.makeHandle({
-          pid: ChildProcessSpawner.ProcessId(1),
-          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
-          isRunning: Effect.succeed(false),
-          kill: () => Effect.void,
-          unref: Effect.succeed(Effect.void),
-          stdin: Sink.drain,
-          stdout: Stream.encodeText(
-            Stream.make(
-              inspectPayload([
-                {
-                  name: "kept",
-                  source: { type: "project", path: "/workspaces/demo/.grok/skills/kept/SKILL.md" },
-                },
-              ]),
-            ),
-          ),
-          stderr: Stream.empty,
-          all: Stream.empty,
-          getInputFd: () => Sink.drain,
-          getOutputFd: () => Stream.empty,
+        makeSpawnHandle({
+          stdout: inspectPayload([
+            {
+              name: "kept",
+              source: { type: "project", path: "/workspaces/demo/.grok/skills/kept/SKILL.md" },
+            },
+          ]),
         }),
       );
     });
@@ -232,6 +255,57 @@ describe("discoverGrokSkills", () => {
 
       expect(spawnCwds).toEqual(["/workspaces/demo"]);
       expect(skills.map((skill) => skill.name)).toEqual(["kept"]);
+    });
+  });
+
+  it.effect("fails open when the inspect process cannot spawn", () => {
+    const spawnError = PlatformError.systemError({
+      _tag: "NotFound",
+      module: "ChildProcess",
+      method: "spawn",
+      cause: new Error("grok executable unavailable"),
+    });
+    const spawner = ChildProcessSpawner.make(() => Effect.fail(spawnError));
+
+    return Effect.gen(function* () {
+      const exit = yield* discoverGrokSkills({ binaryPath: "grok" }).pipe(
+        Effect.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+        Effect.exit,
+      );
+
+      expect(exit).toMatchObject({ _tag: "Success", value: [] });
+    });
+  });
+
+  it.effect("fails open when the inspect process exits non-zero", () => {
+    const spawner = ChildProcessSpawner.make(() =>
+      Effect.succeed(makeSpawnHandle({ stderr: "inspect failed", exitCode: 7 })),
+    );
+
+    return Effect.gen(function* () {
+      const exit = yield* discoverGrokSkills({ binaryPath: "grok" }).pipe(
+        Effect.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+        Effect.exit,
+      );
+
+      expect(exit).toMatchObject({ _tag: "Success", value: [] });
+    });
+  });
+
+  it.effect("fails open when the inspect process times out", () => {
+    const spawner = ChildProcessSpawner.make(() => Effect.succeed(makeNeverFinishingSpawnHandle()));
+
+    return Effect.gen(function* () {
+      const exitFiber = yield* discoverGrokSkills({ binaryPath: "grok" }).pipe(
+        Effect.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+        Effect.exit,
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("4 seconds");
+      const exit = yield* Fiber.join(exitFiber);
+
+      expect(exit).toMatchObject({ _tag: "Success", value: [] });
     });
   });
 });
