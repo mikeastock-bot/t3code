@@ -23,57 +23,55 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { spawnAndCollect } from "../providerSnapshot.ts";
 
 const GROK_SKILLS_PROBE_TIMEOUT_MS = 4_000;
 
-function parseInspectDocument(stdout: string): unknown {
+const GrokInspectSource = Schema.Struct({
+  type: Schema.optional(Schema.String),
+  kind: Schema.optional(Schema.String),
+  path: Schema.optional(Schema.String),
+});
+
+const GrokInspectSkill = Schema.Struct({
+  name: Schema.String,
+  description: Schema.optional(Schema.String),
+  source: Schema.optional(GrokInspectSource),
+  path: Schema.optional(Schema.String),
+  userInvocable: Schema.optional(Schema.Boolean),
+});
+
+const GrokInspectDocument = Schema.Struct({
+  skills: Schema.Array(Schema.Unknown),
+});
+
+const decodeGrokInspectDocument = Schema.decodeUnknownOption(
+  Schema.fromJsonString(GrokInspectDocument),
+);
+const decodeGrokInspectSkill = Schema.decodeUnknownOption(GrokInspectSkill);
+
+function decodeInspectDocument(stdout: string) {
   const trimmed = stdout.replace(/^\uFEFF/, "").trim();
   if (trimmed.length === 0) {
     return undefined;
   }
 
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // Grok may print a warning line before the JSON object, especially on
-    // Windows. Take the outermost object if it is valid JSON.
-    const start = trimmed.indexOf("{");
-    const end = trimmed.lastIndexOf("}");
-    if (start < 0 || end <= start) {
-      return undefined;
-    }
-    try {
-      return JSON.parse(trimmed.slice(start, end + 1));
-    } catch {
-      return undefined;
-    }
+  const decoded = decodeGrokInspectDocument(trimmed);
+  if (Option.isSome(decoded)) {
+    return decoded.value;
   }
-}
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value !== "object" || value === null) {
+  // Grok may print a warning line before the JSON object, especially on
+  // Windows. Take the outermost object if it is valid inspect JSON.
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start < 0 || end <= start) {
     return undefined;
   }
-  return value as Record<string, unknown>;
-}
-
-function inspectSourceScope(source: Record<string, unknown> | undefined): string {
-  const raw = source?.type ?? source?.kind;
-  return typeof raw === "string" ? raw.trim() : "";
-}
-
-function inspectSourcePath(
-  record: Record<string, unknown>,
-  source: Record<string, unknown> | undefined,
-): string {
-  const fromSource = typeof source?.path === "string" ? source.path.trim() : "";
-  if (fromSource.length > 0) {
-    return fromSource;
-  }
-  return typeof record.path === "string" ? record.path.trim() : "";
+  return Option.getOrUndefined(decodeGrokInspectDocument(trimmed.slice(start, end + 1)));
 }
 
 /**
@@ -84,27 +82,25 @@ function inspectSourcePath(
  * repeats a name, the first entry wins.
  */
 export function parseGrokInspectSkills(stdout: string): ReadonlyArray<ServerProviderSkill> {
-  const parsed = parseInspectDocument(stdout);
-  const root = asRecord(parsed);
-  const entries = root?.skills;
-  if (!Array.isArray(entries)) {
+  const document = decodeInspectDocument(stdout);
+  if (!document) {
     return [];
   }
 
   const skillsByName = new Map<string, ServerProviderSkill>();
-  for (const entry of entries) {
-    const record = asRecord(entry);
-    if (!record) {
+  for (const entry of document.skills) {
+    const decoded = decodeGrokInspectSkill(entry);
+    if (Option.isNone(decoded)) {
       continue;
     }
-    const name = typeof record.name === "string" ? record.name.trim() : "";
-    const source = asRecord(record.source);
-    const path = inspectSourcePath(record, source);
+    const record = decoded.value;
+    const name = record.name.trim();
+    const path = (record.source?.path ?? record.path ?? "").trim();
     if (!name || !path || skillsByName.has(name)) {
       continue;
     }
-    const scope = inspectSourceScope(source);
-    const description = typeof record.description === "string" ? record.description.trim() : "";
+    const scope = (record.source?.type ?? record.source?.kind ?? "").trim();
+    const description = record.description?.trim() ?? "";
     skillsByName.set(name, {
       name,
       path,

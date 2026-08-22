@@ -158,8 +158,14 @@ describe("parseGrokInspectSkills", () => {
         { name: "  ", source: { type: "user", path: "/tmp/skills/a/SKILL.md" } },
         { name: "no-path", source: { type: "user" } },
         { name: "no-source" },
+        { name: 42, source: { type: "user", path: "/tmp/skills/wrong-name/SKILL.md" } },
+        { name: "wrong-source", source: "user" },
         "not-an-object",
-        { name: "kept", source: { type: "project", path: "/repo/.grok/skills/kept/SKILL.md" } },
+        {
+          name: "kept",
+          source: { type: "project", path: "/repo/.grok/skills/kept/SKILL.md" },
+          ignoredByT3: true,
+        },
       ]),
     );
 
