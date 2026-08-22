@@ -181,6 +181,9 @@ describe("parseGrokInspectSkills", () => {
     expect(
       parseGrokInspectSkills(`warn: inspect starting\n${body}`).map((skill) => skill.name),
     ).toEqual(["kept"]);
+    expect(
+      parseGrokInspectSkills(`warn: config contains {braces}\n${body}`).map((skill) => skill.name),
+    ).toEqual(["kept"]);
   });
 
   it("returns an empty list for malformed or unexpected output", () => {

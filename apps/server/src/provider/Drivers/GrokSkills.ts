@@ -65,13 +65,17 @@ function decodeInspectDocument(stdout: string) {
   }
 
   // Grok may print a warning line before the JSON object, especially on
-  // Windows. Take the outermost object if it is valid inspect JSON.
-  const start = trimmed.indexOf("{");
+  // Windows. Try each object start because the warning itself may contain
+  // braces before the inspect document.
   const end = trimmed.lastIndexOf("}");
-  if (start < 0 || end <= start) {
-    return undefined;
+  for (let start = trimmed.indexOf("{"); start >= 0 && start < end; ) {
+    const candidate = decodeGrokInspectDocument(trimmed.slice(start, end + 1));
+    if (Option.isSome(candidate)) {
+      return candidate.value;
+    }
+    start = trimmed.indexOf("{", start + 1);
   }
-  return Option.getOrUndefined(decodeGrokInspectDocument(trimmed.slice(start, end + 1)));
+  return undefined;
 }
 
 /**
