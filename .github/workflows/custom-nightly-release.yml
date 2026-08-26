@@ -39,7 +39,7 @@ env:
     .github/custom-patches/github-release-cli.patch
   # Extra fix branches, merged in this order after bundled patches.
   PATCH_BRANCHES: |
-    # fix/my-thing
+    fix/grok-skill-catalog
 
 jobs:
   sync_upstream_main:
@@ -270,8 +270,12 @@ jobs:
             args:
               - --filter=t3...
 
-      - name: Test custom CLI install spec
-        run: vp test run apps/server/src/cloud/pinnedRuntime.test.ts
+      - name: Test maintained patches
+        run: >-
+          vp test run
+          apps/server/src/cloud/pinnedRuntime.test.ts
+          apps/server/src/provider/Drivers/GrokSkills.test.ts
+          apps/server/src/provider/Layers/GrokProvider.test.ts
 
       - name: Build node-pty linux-x64 prebuild
         shell: bash
