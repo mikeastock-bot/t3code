@@ -33,9 +33,13 @@ env:
   T3CODE_CLERK_JWT_TEMPLATE: t3-relay
   T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: hzxSgY2cH10sDU2r
   T3CODE_RELAY_URL: https://relay.t3.codes
-  # Apply patch branches in this order. Add personal fixes here.
+  # Mailbox patches on fork main, applied onto the upstream nightly tag.
+  # Keeps daemon tarball packing working without a long-lived patch branch.
+  BUNDLED_PATCHES: |
+    .github/custom-patches/github-release-cli.patch
+  # Extra fix branches, merged in this order after bundled patches.
   PATCH_BRANCHES: |
-    custom/github-release-cli
+    # fix/my-thing
 
 jobs:
   sync_upstream_main:
@@ -191,12 +195,24 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --force --no-tags origin \
+            "refs/heads/main:refs/remotes/origin/main"
           git switch --force-create "$CUSTOM_RELEASE_BRANCH" "$upstream_sha"
 
           applied_patches=()
+          while IFS= read -r patch_file; do
+            patch_file="${patch_file//$'\r'/}"
+            [[ -z "$patch_file" ]] && continue
+
+            bundled="$RUNNER_TEMP/bundled-$(basename "$patch_file")"
+            git show "refs/remotes/origin/main:${patch_file}" > "$bundled"
+            git am --3way "$bundled"
+            applied_patches+=("$patch_file")
+          done <<< "$BUNDLED_PATCHES"
+
           while IFS= read -r patch_branch; do
             patch_branch="${patch_branch//$'\r'/}"
-            [[ -z "$patch_branch" ]] && continue
+            [[ -z "$patch_branch" || "$patch_branch" == \#* ]] && continue
 
             git fetch --force --no-tags origin \
               "refs/heads/${patch_branch}:refs/remotes/origin/${patch_branch}"

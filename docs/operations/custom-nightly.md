@@ -13,7 +13,8 @@ Every hour, and on manual dispatch:
 
 1. Fast-forwards fork `main` from `pingdotgg/t3code`.
 2. Resolves the latest upstream nightly tag, or the tag you pass in.
-3. Merges `PATCH_BRANCHES` onto that tag and force-pushes `custom-release`.
+3. Applies bundled patches from `.github/custom-patches/`, then merges
+   `PATCH_BRANCHES`, and force-pushes `custom-release`.
 4. Builds unsigned desktop artifacts:
    - macOS arm64 DMG
    - Linux x64 AppImage
@@ -29,7 +30,8 @@ If that custom tag already exists, the run stops. Dispatch again with a higher
 ## Add a custom fix
 
 Keep product fixes on their own branches. Do not commit them to fork `main`.
-`main` only carries this workflow, this doc, and the upstream merge.
+`main` only carries this workflow, bundled patches, this doc, and the upstream
+merge.
 
 1. Branch from current `main` (or rebase an existing fix onto it).
 2. Land the fix and push the branch to this fork.
@@ -41,16 +43,22 @@ Keep patch branches small and rebase them when upstream moves. The workflow
 merges each branch onto the upstream nightly tag; a branch that also contains
 all of `main` will drag those extra commits into the custom build.
 
-The default patch, `custom/github-release-cli`, is required. It packs the CLI
-tarball and makes the daemon install that tarball from this fork's releases
-instead of looking for `t3@version` on npm.
+The bundled patch `.github/custom-patches/github-release-cli.patch` is required.
+It packs the CLI tarball and makes the daemon install that tarball from this
+fork's releases instead of looking for `t3@version` on npm. If it stops
+applying, regenerate it from a rebased `custom/github-release-cli` branch:
+
+```sh
+git format-patch --stdout origin/main..custom/github-release-cli \
+  > .github/custom-patches/github-release-cli.patch
+```
 
 ## Consume a build
 
 ### Desktop
 
 Install the custom build once from
-[this fork's Releases](https://github.com/mikeastock-bot/t3code/releases).
+[this fork's Releases](https://github.com/mikeastock/t3code/releases).
 `T3CODE_DESKTOP_UPDATE_REPOSITORY` is baked in at package time, so later
 nightlies come from this fork. Stay on the nightly update channel.
 
@@ -65,11 +73,11 @@ The official `t3` package on npm does not contain these versions. First switch
 from an official service install with the tarball URL from the release:
 
 ```sh
-npx --yes t3@https://github.com/mikeastock-bot/t3code/releases/download/vVERSION/t3-VERSION.tgz service update
+npx --yes t3@https://github.com/mikeastock/t3code/releases/download/vVERSION/t3-VERSION.tgz service update
 ```
 
 Replace `VERSION` with the custom version, for example
-`0.0.34-nightly.20260826.118201`. That custom CLI bakes
+`0.0.35-nightly.20260826.119501`. That custom CLI bakes
 `T3CODE_CLI_UPDATE_REPOSITORY`, so later in-app **Update server** actions
 install the next tarball from this fork.
 

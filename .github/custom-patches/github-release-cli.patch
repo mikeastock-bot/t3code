@@ -1,0 +1,187 @@
+From e60103e9102f03747be7b52c7b63bdbbab45515c Mon Sep 17 00:00:00 2001
+From: Michael Stock <mikeastock@gmail.com>
+Date: Wed, 26 Aug 2026 20:20:10 +0000
+Subject: [PATCH 1/2] feat(server): install custom nightlies from GitHub
+ release tarballs
+
+Custom fork builds cannot publish the t3 package to npm. Pack the CLI as a
+tarball and, when T3CODE_CLI_UPDATE_REPOSITORY is baked in, install that
+tarball from GitHub Releases instead of t3@version.
+---
+ apps/server/scripts/cli.ts                  | 19 ++++++++++++++
+ apps/server/src/cloud/pinnedRuntime.test.ts | 15 +++++++++++
+ apps/server/src/cloud/pinnedRuntime.ts      | 28 ++++++++++++++++++++-
+ apps/server/vite.config.ts                  |  3 +++
+ 4 files changed, 64 insertions(+), 1 deletion(-)
+
+diff --git a/apps/server/scripts/cli.ts b/apps/server/scripts/cli.ts
+index 2de5b702a..802525cf4 100644
+--- a/apps/server/scripts/cli.ts
++++ b/apps/server/scripts/cli.ts
+@@ -212,6 +212,7 @@ const publishCmd = Command.make(
+     appVersion: Flag.string("app-version").pipe(Flag.optional),
+     provenance: Flag.boolean("provenance").pipe(Flag.withDefault(false)),
+     dryRun: Flag.boolean("dry-run").pipe(Flag.withDefault(false)),
++    packDestination: Flag.string("pack-destination").pipe(Flag.optional),
+     verbose: Flag.boolean("verbose").pipe(Flag.withDefault(false)),
+   },
+   (config) =>
+@@ -277,6 +278,24 @@ const publishCmd = Command.make(
+             }
+             yield* Effect.log("[cli] Applied package metadata and publish icon overrides");
+ 
++            const packDestination = Option.getOrUndefined(config.packDestination)?.trim();
++            if (packDestination) {
++              const destination = path.isAbsolute(packDestination)
++                ? packDestination
++                : path.resolve(packDestination);
++              yield* fs.makeDirectory(destination, { recursive: true });
++              yield* Effect.log(`[cli] Running: npm pack --pack-destination ${destination}`);
++              yield* runCommand(
++                ChildProcess.make("npm", ["pack", "--pack-destination", destination], {
++                  cwd: serverDir,
++                  stdout: config.verbose ? "inherit" : "ignore",
++                  stderr: "inherit",
++                  shell: false,
++                }),
++              );
++              return;
++            }
++
+             const args = createVpPmPublishArgs(config);
+             const spawnCommand = yield* resolveSpawnCommand("vp", ["pm", ...args]);
+ 
+diff --git a/apps/server/src/cloud/pinnedRuntime.test.ts b/apps/server/src/cloud/pinnedRuntime.test.ts
+index f34f0f5cf..d48a9f37c 100644
+--- a/apps/server/src/cloud/pinnedRuntime.test.ts
++++ b/apps/server/src/cloud/pinnedRuntime.test.ts
+@@ -12,8 +12,23 @@ import {
+   ensurePinnedRuntimeInstalled,
+   pinnedRuntimePaths,
+   PinnedRuntimeInstallError,
++  resolvePinnedRuntimeInstallSpec,
+ } from "./pinnedRuntime.ts";
+ 
++it("installs t3@version from npm when no custom repository is configured", () => {
++  assert.equal(resolvePinnedRuntimeInstallSpec("1.2.3", ""), "t3@1.2.3");
++});
++
++it("installs a GitHub release tarball when a custom repository is configured", () => {
++  assert.equal(
++    resolvePinnedRuntimeInstallSpec(
++      "0.0.34-nightly.20260826.118201",
++      "mikeastock-bot/t3code",
++    ),
++    "https://github.com/mikeastock-bot/t3code/releases/download/v0.0.34-nightly.20260826.118201/t3-0.0.34-nightly.20260826.118201.tgz",
++  );
++});
++
+ const successfulRunner = (fs: FileSystem.FileSystem, path: Path.Path) =>
+   ProcessRunner.ProcessRunner.of({
+     run: (input) =>
+diff --git a/apps/server/src/cloud/pinnedRuntime.ts b/apps/server/src/cloud/pinnedRuntime.ts
+index 06628d5cc..1ebc794cc 100644
+--- a/apps/server/src/cloud/pinnedRuntime.ts
++++ b/apps/server/src/cloud/pinnedRuntime.ts
+@@ -8,12 +8,17 @@ import * as Semaphore from "effect/Semaphore";
+ 
+ import * as ProcessRunner from "../processRunner.ts";
+ 
++declare const __T3CODE_BUILD_CLI_UPDATE_REPOSITORY__: string | undefined;
++
+ /**
+  * A pinned runtime is an exact `t3@<version>` npm-installed into
+  * <baseDir>/runtime/versions/<version>. The boot service points its unit or
+  * launch agent here, and server self-update installs the target version here before
+  * switching over, never `npx t3`, whose cache is ephemeral and whose
+  * registry fetch at boot would make startup depend on the network.
++ *
++ * Custom nightlies can bake `T3CODE_CLI_UPDATE_REPOSITORY` (owner/repo) so the
++ * daemon installs the matching GitHub Release tarball instead of looking on npm.
+  */
+ 
+ const PINNED_RUNTIME_DIR = "runtime";
+@@ -28,6 +33,20 @@ export interface PinnedRuntimePaths {
+   readonly sentinelPath: string;
+ }
+ 
++export function resolveCliUpdateRepository(): string {
++  return typeof __T3CODE_BUILD_CLI_UPDATE_REPOSITORY__ === "undefined"
++    ? ""
++    : __T3CODE_BUILD_CLI_UPDATE_REPOSITORY__.trim();
++}
++
++export function resolvePinnedRuntimeInstallSpec(
++  version: string,
++  repository = resolveCliUpdateRepository(),
++): string {
++  if (repository.length === 0) return `t3@${version}`;
++  return `https://github.com/${repository}/releases/download/v${version}/t3-${version}.tgz`;
++}
++
+ export function pinnedRuntimePaths(
+   path: Path.Path,
+   baseDir: string,
+@@ -155,7 +174,14 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
+     yield* runner
+       .run({
+         command: "npm",
+-        args: ["install", "--prefix", stagingDir, "--no-fund", "--no-audit", `t3@${input.version}`],
++        args: [
++          "install",
++          "--prefix",
++          stagingDir,
++          "--no-fund",
++          "--no-audit",
++          resolvePinnedRuntimeInstallSpec(input.version),
++        ],
+         // Native dependencies may compile from source on slower machines.
+         timeout: PINNED_RUNTIME_INSTALL_TIMEOUT,
+       })
+diff --git a/apps/server/vite.config.ts b/apps/server/vite.config.ts
+index 647af2a88..11dc80e80 100644
+--- a/apps/server/vite.config.ts
++++ b/apps/server/vite.config.ts
+@@ -72,6 +72,9 @@ export default mergeConfig(
+         __T3CODE_BUILD_RELAY_CLIENT_OTLP_TRACES_TOKEN__: JSON.stringify(
+           repoEnv.T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN?.trim() ?? "",
+         ),
++        __T3CODE_BUILD_CLI_UPDATE_REPOSITORY__: JSON.stringify(
++          repoEnv.T3CODE_CLI_UPDATE_REPOSITORY?.trim() ?? "",
++        ),
+       },
+     },
+     test: {
+-- 
+2.43.0
+
+
+From b53b8b5464b828720fdc76a1286b2d13d4e0ef3c Mon Sep 17 00:00:00 2001
+From: Michael Stock <mikeastock@gmail.com>
+Date: Wed, 26 Aug 2026 20:29:39 +0000
+Subject: [PATCH 2/2] test(server): use mikeastock/t3code in custom install
+ spec example
+
+---
+ apps/server/src/cloud/pinnedRuntime.test.ts | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/apps/server/src/cloud/pinnedRuntime.test.ts b/apps/server/src/cloud/pinnedRuntime.test.ts
+index d48a9f37c..9f96cefae 100644
+--- a/apps/server/src/cloud/pinnedRuntime.test.ts
++++ b/apps/server/src/cloud/pinnedRuntime.test.ts
+@@ -23,9 +23,9 @@ it("installs a GitHub release tarball when a custom repository is configured", (
+   assert.equal(
+     resolvePinnedRuntimeInstallSpec(
+       "0.0.34-nightly.20260826.118201",
+-      "mikeastock-bot/t3code",
++      "mikeastock/t3code",
+     ),
+-    "https://github.com/mikeastock-bot/t3code/releases/download/v0.0.34-nightly.20260826.118201/t3-0.0.34-nightly.20260826.118201.tgz",
++    "https://github.com/mikeastock/t3code/releases/download/v0.0.34-nightly.20260826.118201/t3-0.0.34-nightly.20260826.118201.tgz",
+   );
+ });
+ 
+-- 
+2.43.0
+
