@@ -23,9 +23,9 @@ it("installs a GitHub release tarball when a custom repository is configured", (
   assert.equal(
     resolvePinnedRuntimeInstallSpec(
       "0.0.34-nightly.20260826.118201",
-      "mikeastock-bot/t3code",
+      "mikeastock/t3code",
     ),
-    "https://github.com/mikeastock-bot/t3code/releases/download/v0.0.34-nightly.20260826.118201/t3-0.0.34-nightly.20260826.118201.tgz",
+    "https://github.com/mikeastock/t3code/releases/download/v0.0.34-nightly.20260826.118201/t3-0.0.34-nightly.20260826.118201.tgz",
   );
 });
 
