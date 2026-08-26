@@ -1,0 +1,604 @@
+name: Custom nightly
+run-name: Sync upstream and build custom nightly
+
+on:
+  schedule:
+    # Forks do not receive workflow events from upstream pushes. Poll hourly to
+    # sync main and pick up a newly published upstream nightly release.
+    - cron: "45 * * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Exact upstream nightly tag (blank uses the latest release)"
+        required: false
+        type: string
+      revision:
+        description: "Custom build revision for this upstream nightly (1-99)"
+        required: false
+        default: "1"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: custom-nightly
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: pingdotgg/t3code
+  CUSTOM_RELEASE_BRANCH: custom-release
+  # Public T3 Connect client config. Same values official releases bake in.
+  T3CODE_CLERK_PUBLISHABLE_KEY: pk_live_Y2xlcmsudDMuY29kZXMk
+  T3CODE_CLERK_JWT_TEMPLATE: t3-relay
+  T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: hzxSgY2cH10sDU2r
+  T3CODE_RELAY_URL: https://relay.t3.codes
+  # Apply patch branches in this order. Add personal fixes here.
+  PATCH_BRANCHES: |
+    custom/github-release-cli
+
+jobs:
+  sync_upstream_main:
+    name: Sync fork main from upstream
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Clone fork
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          gh repo clone "$GITHUB_REPOSITORY" "$RUNNER_TEMP/sync-source" -- \
+            --filter=blob:none \
+            --no-checkout
+
+      - name: Merge upstream main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ runner.temp }}/sync-source
+        run: |
+          set -euo pipefail
+
+          upstream_url="https://github.com/${UPSTREAM_REPOSITORY}.git"
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "$upstream_url"
+          else
+            git remote add upstream "$upstream_url"
+          fi
+
+          git fetch --force --no-tags origin \
+            "refs/heads/main:refs/remotes/origin/main"
+          git fetch --force --no-tags upstream \
+            "refs/heads/main:refs/remotes/upstream/main"
+
+          origin_sha="$(git rev-parse refs/remotes/origin/main)"
+          upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
+          git switch --force-create main "$origin_sha"
+
+          if git merge-base --is-ancestor "$upstream_sha" "$origin_sha"; then
+            echo "Fork main already contains upstream ${upstream_sha}."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-ff --no-edit refs/remotes/upstream/main
+          git push origin HEAD:refs/heads/main
+
+          {
+            echo "### Upstream main synchronized"
+            echo
+            echo "- Previous fork main: \`${origin_sha}\`"
+            echo "- Upstream main: \`${upstream_sha}\`"
+            echo "- Synchronized fork main: \`$(git rev-parse HEAD)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  prepare:
+    name: Prepare patched source
+    needs: sync_upstream_main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      should_build: ${{ steps.prepare.outputs.should_build }}
+      upstream_tag: ${{ steps.prepare.outputs.upstream_tag }}
+      upstream_sha: ${{ steps.prepare.outputs.upstream_sha }}
+      custom_version: ${{ steps.prepare.outputs.custom_version }}
+      custom_tag: ${{ steps.prepare.outputs.custom_tag }}
+      custom_sha: ${{ steps.prepare.outputs.custom_sha }}
+      patches: ${{ steps.prepare.outputs.patches }}
+    steps:
+      - name: Clone automation repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          gh repo clone "$GITHUB_REPOSITORY" "$RUNNER_TEMP/custom-source" -- \
+            --filter=blob:none \
+            --no-checkout
+
+      - id: prepare
+        name: Resolve upstream nightly and apply patches
+        shell: bash
+        working-directory: ${{ runner.temp }}/custom-source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          REQUESTED_REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+
+          upstream_tag="${REQUESTED_UPSTREAM_TAG:-}"
+          if [[ -z "$upstream_tag" ]]; then
+            while IFS= read -r candidate; do
+              if [[ "$candidate" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[0-9]+$ ]]; then
+                upstream_tag="$candidate"
+                break
+              fi
+            done < <(
+              gh api "repos/${UPSTREAM_REPOSITORY}/releases?per_page=100" \
+                --jq '.[] | select(.prerelease == true and .draft == false) | .tag_name'
+            )
+          fi
+
+          if [[ ! "$upstream_tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-nightly\.([0-9]{8})\.([0-9]+)$ ]]; then
+            echo "No valid upstream nightly tag was found: ${upstream_tag:-<empty>}" >&2
+            exit 1
+          fi
+
+          base_version="${BASH_REMATCH[1]}"
+          nightly_date="${BASH_REMATCH[2]}"
+          upstream_run="${BASH_REMATCH[3]}"
+
+          revision="${REQUESTED_REVISION:-1}"
+          if [[ ! "$revision" =~ ^[0-9]+$ ]] || (( 10#$revision < 1 || 10#$revision > 99 )); then
+            echo "Revision must be an integer from 1 through 99." >&2
+            exit 1
+          fi
+
+          custom_run=$((10#$upstream_run * 100 + 10#$revision))
+          custom_version="${base_version}-nightly.${nightly_date}.${custom_run}"
+          custom_tag="v${custom_version}"
+
+          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "custom_version=$custom_version" >> "$GITHUB_OUTPUT"
+          echo "custom_tag=$custom_tag" >> "$GITHUB_OUTPUT"
+
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${custom_tag}" >/dev/null 2>&1; then
+            echo "Custom release $custom_tag already exists; nothing to build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${custom_tag}" >/dev/null 2>&1; then
+            echo "Tag $custom_tag exists without a matching release. Use a higher revision to retry." >&2
+            exit 1
+          fi
+
+          upstream_url="https://github.com/${UPSTREAM_REPOSITORY}.git"
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "$upstream_url"
+          else
+            git remote add upstream "$upstream_url"
+          fi
+          git fetch --force --no-tags upstream \
+            "refs/tags/${upstream_tag}:refs/remotes/upstream/custom-nightly-source"
+          upstream_sha="$(git rev-parse 'refs/remotes/upstream/custom-nightly-source^{commit}')"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --force-create "$CUSTOM_RELEASE_BRANCH" "$upstream_sha"
+
+          applied_patches=()
+          while IFS= read -r patch_branch; do
+            patch_branch="${patch_branch//$'\r'/}"
+            [[ -z "$patch_branch" ]] && continue
+
+            git fetch --force --no-tags origin \
+              "refs/heads/${patch_branch}:refs/remotes/origin/${patch_branch}"
+            git merge --no-ff --no-edit "refs/remotes/origin/${patch_branch}"
+            applied_patches+=("$patch_branch")
+          done <<< "$PATCH_BRANCHES"
+
+          custom_sha="$(git rev-parse HEAD)"
+          patches="$(IFS=,; echo "${applied_patches[*]}")"
+          expected_sha="$(git ls-remote origin "refs/heads/${CUSTOM_RELEASE_BRANCH}" | cut -f1)"
+          if [[ -n "$expected_sha" ]]; then
+            git push \
+              --force-with-lease="refs/heads/${CUSTOM_RELEASE_BRANCH}:${expected_sha}" \
+              origin "HEAD:refs/heads/${CUSTOM_RELEASE_BRANCH}"
+          else
+            git push origin "HEAD:refs/heads/${CUSTOM_RELEASE_BRANCH}"
+          fi
+
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "custom_sha=$custom_sha" >> "$GITHUB_OUTPUT"
+          echo "patches=${patches:-none}" >> "$GITHUB_OUTPUT"
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Custom nightly source"
+            echo
+            echo "- Upstream: \`${UPSTREAM_REPOSITORY}@${upstream_tag}\` (\`${upstream_sha}\`)"
+            echo "- Version: \`${custom_version}\`"
+            echo "- Generated branch: \`${CUSTOM_RELEASE_BRANCH}\` (\`${custom_sha}\`)"
+            echo "- Patches: \`${patches:-none}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build_wsl_node_pty:
+    name: Build WSL node-pty (linux-x64)
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout patched source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.custom_sha }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=t3...
+
+      - name: Test custom CLI install spec
+        run: vp test run apps/server/src/cloud/pinnedRuntime.test.ts
+
+      - name: Build node-pty linux-x64 prebuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          pty_pkg="$(node -e "console.log(require.resolve('node-pty/package.json', { paths: ['$GITHUB_WORKSPACE/apps/server'] }))")"
+          pty_dir="$(dirname "$pty_pkg")"
+          ( cd "$pty_dir" && npx --yes node-gyp rebuild )
+          mkdir -p wsl-prebuild
+          cp "$pty_dir/build/Release/pty.node" wsl-prebuild/pty.node
+          file wsl-prebuild/pty.node
+
+      - name: Upload WSL prebuild
+        uses: actions/upload-artifact@v7
+        with:
+          name: custom-wsl-node-pty-x64
+          path: wsl-prebuild/pty.node
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: [prepare, build_wsl_node_pty]
+    if: ${{ !cancelled() && needs.prepare.outputs.should_build == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    env:
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            runner: macos-15
+            platform: mac
+            target: dmg
+            arch: arm64
+            rust_target: aarch64-apple-darwin
+            resource_key: darwin-arm64
+          - label: Linux x64
+            runner: ubuntu-24.04
+            platform: linux
+            target: AppImage
+            arch: x64
+            rust_target: x86_64-unknown-linux-gnu
+            resource_key: linux-x64
+          - label: Windows x64
+            runner: windows-2025
+            platform: win
+            target: nsis
+            arch: x64
+            rust_target: x86_64-pc-windows-msvc
+            resource_key: win32-x64
+    steps:
+      - name: Checkout patched source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.custom_sha }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: ${{ matrix.platform != 'win' }}
+          run-install: false
+
+      - name: Resolve Windows package cache path
+        if: matrix.platform == 'win'
+        id: package_cache_path
+        shell: pwsh
+        run: '"path=$(vp pm cache dir)" >> $env:GITHUB_OUTPUT'
+
+      - name: Cache Windows packages
+        if: matrix.platform == 'win'
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.package_cache_path.outputs.path }}
+          key: custom-windows-release-v1-${{ matrix.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install desktop dependencies
+        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Cache resource monitor
+        id: resource_monitor_cache
+        uses: actions/cache@v6
+        with:
+          path: native/resource-monitor/target/${{ matrix.rust_target }}/release/t3-resource-monitor${{ matrix.platform == 'win' && '.exe' || '' }}
+          key: custom-resource-monitor-${{ matrix.rust_target }}-${{ hashFiles('native/resource-monitor/Cargo.lock', 'native/resource-monitor/Cargo.toml', 'native/resource-monitor/src/**') }}
+
+      - name: Setup Rust
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Align package versions
+        run: node scripts/update-release-package-versions.ts "${{ needs.prepare.outputs.custom_version }}"
+
+      - name: Download WSL prebuild
+        if: matrix.platform == 'win'
+        uses: actions/download-artifact@v8
+        with:
+          name: custom-wsl-node-pty-x64
+          path: wsl-prebuild
+
+      - name: Install Spectre-mitigated MSVC libs
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
+      - name: Install ImageMagick
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y imagemagick
+          fi
+
+          if command -v magick >/dev/null 2>&1; then
+              magick -version
+          else
+              convert -version
+          fi
+
+      - name: Build unsigned desktop artifact
+        shell: bash
+        env:
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: ${{ steps.resource_monitor_cache.outputs.cache-hit == 'true' }}
+        run: |
+          args=(
+            --platform "${{ matrix.platform }}"
+            --target "${{ matrix.target }}"
+            --arch "${{ matrix.arch }}"
+            --build-version "${{ needs.prepare.outputs.custom_version }}"
+            --verbose
+          )
+
+          if [[ "${{ matrix.platform }}" == "win" ]]; then
+            args+=(--wsl-prebuild "$GITHUB_WORKSPACE/wsl-prebuild/pty.node")
+          fi
+
+          vp run dist:desktop:artifact "${args[@]}"
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-publish
+
+          shopt -s nullglob
+          for pattern in \
+            "release/*.dmg" \
+            "release/*.zip" \
+            "release/*.AppImage" \
+            "release/*.exe" \
+            "release/*.blockmap" \
+            "release/*.yml"; do
+            for file in $pattern; do
+              cp "$file" release-publish/
+            done
+          done
+
+      - name: Collect resource monitor
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary_name="t3-resource-monitor"
+          if [[ "${{ matrix.platform }}" == "win" ]]; then
+            binary_name="${binary_name}.exe"
+          fi
+          source_path="native/resource-monitor/target/${{ matrix.rust_target }}/release/${binary_name}"
+          target_dir="resource-monitor-publish/${{ matrix.resource_key }}"
+          mkdir -p "$target_dir"
+          cp "$source_path" "$target_dir/$binary_name"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: custom-desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release-publish/*
+          if-no-files-found: error
+
+      - name: Upload resource monitor
+        uses: actions/upload-artifact@v7
+        with:
+          name: custom-resource-monitor-${{ matrix.resource_key }}
+          path: resource-monitor-publish/${{ matrix.resource_key }}/*
+          if-no-files-found: error
+
+  pack_cli:
+    name: Pack CLI tarball
+    needs: [prepare, build]
+    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.should_build == 'true' && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      T3CODE_CLI_UPDATE_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Checkout patched source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.custom_sha }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=t3...
+              - --filter=@t3tools/web...
+              - --filter=@t3tools/scripts...
+
+      - name: Align package versions
+        run: node scripts/update-release-package-versions.ts "${{ needs.prepare.outputs.custom_version }}"
+
+      - name: Build CLI package
+        run: vp run --filter t3 build
+
+      - name: Download resource monitors
+        uses: actions/download-artifact@v8
+        with:
+          pattern: custom-resource-monitor-*
+          path: ${{ runner.temp }}/resource-monitors
+
+      - name: Bundle resource monitors into CLI package
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact_dir in "$RUNNER_TEMP"/resource-monitors/custom-resource-monitor-*; do
+            resource_key="${artifact_dir##*/custom-resource-monitor-}"
+            target_dir="apps/server/dist/resource-monitor/${resource_key}"
+            mkdir -p "$target_dir"
+            cp "$artifact_dir"/t3-resource-monitor* "$target_dir/"
+            chmod +x "$target_dir"/t3-resource-monitor 2>/dev/null || true
+          done
+
+      - name: Pack CLI tarball
+        run: >
+          node apps/server/scripts/cli.ts publish
+          --pack-destination "$RUNNER_TEMP/cli-pack"
+          --app-version "${{ needs.prepare.outputs.custom_version }}"
+          --verbose
+
+      - name: Upload CLI tarball
+        uses: actions/upload-artifact@v7
+        with:
+          name: custom-cli-tarball
+          path: ${{ runner.temp }}/cli-pack/*.tgz
+          if-no-files-found: error
+
+  release:
+    name: Publish custom nightly
+    needs: [prepare, build, pack_cli]
+    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.should_build == 'true' && needs.build.result == 'success' && needs.pack_cli.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download desktop release assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: custom-desktop-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Download CLI tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: custom-cli-tarball
+          path: release-assets
+
+      - name: Check release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la release-assets
+          shopt -s nullglob
+          tarballs=(release-assets/*.tgz)
+          manifests=(release-assets/*.yml)
+          if (( ${#tarballs[@]} == 0 )); then
+            echo "CLI tarball is missing from release assets." >&2
+            exit 1
+          fi
+          if (( ${#manifests[@]} == 0 )); then
+            echo "Desktop updater manifests are missing from release assets." >&2
+            exit 1
+          fi
+
+      - name: Write release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+          PATCHES: ${{ needs.prepare.outputs.patches }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "Custom nightly of \`${UPSTREAM_REPOSITORY}@${UPSTREAM_TAG}\`."
+            echo
+            echo "Patches: \`${PATCHES}\`"
+            echo
+            echo "Desktop auto-updates from this repository. The daemon installs"
+            echo "the matching \`t3-*.tgz\` asset from this release."
+            echo
+            echo "---"
+            echo
+            gh api "repos/${UPSTREAM_REPOSITORY}/releases/tags/${UPSTREAM_TAG}" \
+              --jq '.body'
+          } > "$RUNNER_TEMP/custom-release-notes.md"
+
+      - name: Publish GitHub prerelease
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.custom_tag }}
+          target_commitish: ${{ needs.prepare.outputs.custom_sha }}
+          name: T3 Code ${{ needs.prepare.outputs.custom_version }} (custom)
+          body_path: ${{ runner.temp }}/custom-release-notes.md
+          prerelease: true
+          make_latest: false
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          token: ${{ github.token }}
