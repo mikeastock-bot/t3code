@@ -8,12 +8,17 @@ import * as Semaphore from "effect/Semaphore";
 
 import * as ProcessRunner from "../processRunner.ts";
 
+declare const __T3CODE_BUILD_CLI_UPDATE_REPOSITORY__: string | undefined;
+
 /**
  * A pinned runtime is an exact `t3@<version>` npm-installed into
  * <baseDir>/runtime/versions/<version>. The boot service points its unit or
  * launch agent here, and server self-update installs the target version here before
  * switching over, never `npx t3`, whose cache is ephemeral and whose
  * registry fetch at boot would make startup depend on the network.
+ *
+ * Custom nightlies can bake `T3CODE_CLI_UPDATE_REPOSITORY` (owner/repo) so the
+ * daemon installs the matching GitHub Release tarball instead of looking on npm.
  */
 
 const PINNED_RUNTIME_DIR = "runtime";
@@ -26,6 +31,20 @@ export interface PinnedRuntimePaths {
   readonly versionDir: string;
   readonly entryPath: string;
   readonly sentinelPath: string;
+}
+
+export function resolveCliUpdateRepository(): string {
+  return typeof __T3CODE_BUILD_CLI_UPDATE_REPOSITORY__ === "undefined"
+    ? ""
+    : __T3CODE_BUILD_CLI_UPDATE_REPOSITORY__.trim();
+}
+
+export function resolvePinnedRuntimeInstallSpec(
+  version: string,
+  repository = resolveCliUpdateRepository(),
+): string {
+  if (repository.length === 0) return `t3@${version}`;
+  return `https://github.com/${repository}/releases/download/v${version}/t3-${version}.tgz`;
 }
 
 export function pinnedRuntimePaths(
@@ -155,7 +174,14 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
     yield* runner
       .run({
         command: "npm",
-        args: ["install", "--prefix", stagingDir, "--no-fund", "--no-audit", `t3@${input.version}`],
+        args: [
+          "install",
+          "--prefix",
+          stagingDir,
+          "--no-fund",
+          "--no-audit",
+          resolvePinnedRuntimeInstallSpec(input.version),
+        ],
         // Native dependencies may compile from source on slower machines.
         timeout: PINNED_RUNTIME_INSTALL_TIMEOUT,
       })

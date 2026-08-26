@@ -12,7 +12,22 @@ import {
   ensurePinnedRuntimeInstalled,
   pinnedRuntimePaths,
   PinnedRuntimeInstallError,
+  resolvePinnedRuntimeInstallSpec,
 } from "./pinnedRuntime.ts";
+
+it("installs t3@version from npm when no custom repository is configured", () => {
+  assert.equal(resolvePinnedRuntimeInstallSpec("1.2.3", ""), "t3@1.2.3");
+});
+
+it("installs a GitHub release tarball when a custom repository is configured", () => {
+  assert.equal(
+    resolvePinnedRuntimeInstallSpec(
+      "0.0.34-nightly.20260826.118201",
+      "mikeastock-bot/t3code",
+    ),
+    "https://github.com/mikeastock-bot/t3code/releases/download/v0.0.34-nightly.20260826.118201/t3-0.0.34-nightly.20260826.118201.tgz",
+  );
+});
 
 const successfulRunner = (fs: FileSystem.FileSystem, path: Path.Path) =>
   ProcessRunner.ProcessRunner.of({

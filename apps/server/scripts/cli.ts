@@ -212,6 +212,7 @@ const publishCmd = Command.make(
     appVersion: Flag.string("app-version").pipe(Flag.optional),
     provenance: Flag.boolean("provenance").pipe(Flag.withDefault(false)),
     dryRun: Flag.boolean("dry-run").pipe(Flag.withDefault(false)),
+    packDestination: Flag.string("pack-destination").pipe(Flag.optional),
     verbose: Flag.boolean("verbose").pipe(Flag.withDefault(false)),
   },
   (config) =>
@@ -276,6 +277,24 @@ const publishCmd = Command.make(
               yield* fs.writeFile(icon.targetPath, icon.publish);
             }
             yield* Effect.log("[cli] Applied package metadata and publish icon overrides");
+
+            const packDestination = Option.getOrUndefined(config.packDestination)?.trim();
+            if (packDestination) {
+              const destination = path.isAbsolute(packDestination)
+                ? packDestination
+                : path.resolve(packDestination);
+              yield* fs.makeDirectory(destination, { recursive: true });
+              yield* Effect.log(`[cli] Running: npm pack --pack-destination ${destination}`);
+              yield* runCommand(
+                ChildProcess.make("npm", ["pack", "--pack-destination", destination], {
+                  cwd: serverDir,
+                  stdout: config.verbose ? "inherit" : "ignore",
+                  stderr: "inherit",
+                  shell: false,
+                }),
+              );
+              return;
+            }
 
             const args = createVpPmPublishArgs(config);
             const spawnCommand = yield* resolveSpawnCommand("vp", ["pm", ...args]);
