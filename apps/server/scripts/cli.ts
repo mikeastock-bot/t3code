@@ -242,6 +242,7 @@ const publishCmd = Command.make(
           const workspaceConfig = yield* readWorkspaceConfig();
           const workspaceCatalog = workspaceConfig.catalog ?? {};
           const workspaceOverrides = workspaceConfig.overrides ?? {};
+          const packing = Boolean(Option.getOrUndefined(config.packDestination)?.trim());
           const pkg: PackageJson = {
             name: serverPackageJson.name,
             repository: serverPackageJson.repository,
@@ -255,11 +256,14 @@ const publishCmd = Command.make(
               workspaceCatalog,
               "apps/server",
             ),
-            overrides: resolveCatalogDependencies(
-              workspaceOverrides,
-              workspaceCatalog,
-              "apps/server",
-            ),
+            // npm pack cannot parse pnpm override selectors such as `pkg>dep`.
+            overrides: packing
+              ? {}
+              : resolveCatalogDependencies(
+                  workspaceOverrides,
+                  workspaceCatalog,
+                  "apps/server",
+                ),
           };
 
           return {
