@@ -236,6 +236,14 @@ jobs:
             applied_patches+=("$patch_branch")
           done <<< "$PATCH_BRANCHES"
 
+          # GITHUB_TOKEN cannot push commits that create or update workflow
+          # files. Squash onto an orphan commit that reuses the fork's existing
+          # workflow tree so the custom-release branch is pushable.
+          git checkout origin/main -- .github/workflows
+          git checkout --orphan "custom-release-${custom_version}"
+          git add -A
+          git commit --quiet -m "T3 Code ${custom_version} (custom nightly source)"
+
           custom_sha="$(git rev-parse HEAD)"
           patches="$(IFS=,; echo "${applied_patches[*]}")"
           expected_sha="$(git ls-remote origin "refs/heads/${CUSTOM_RELEASE_BRANCH}" | cut -f1)"
