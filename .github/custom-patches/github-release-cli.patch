@@ -1,7 +1,7 @@
 From e60103e9102f03747be7b52c7b63bdbbab45515c Mon Sep 17 00:00:00 2001
 From: Michael Stock <mikeastock@gmail.com>
 Date: Wed, 26 Aug 2026 20:20:10 +0000
-Subject: [PATCH 1/2] feat(server): install custom nightlies from GitHub
+Subject: [PATCH 1/3] feat(server): install custom nightlies from GitHub
  release tarballs
 
 Custom fork builds cannot publish the t3 package to npm. Pack the CLI as a
@@ -159,7 +159,7 @@ index 647af2a88..11dc80e80 100644
 From b53b8b5464b828720fdc76a1286b2d13d4e0ef3c Mon Sep 17 00:00:00 2001
 From: Michael Stock <mikeastock@gmail.com>
 Date: Wed, 26 Aug 2026 20:29:39 +0000
-Subject: [PATCH 2/2] test(server): use mikeastock/t3code in custom install
+Subject: [PATCH 2/3] test(server): use mikeastock/t3code in custom install
  spec example
 
 ---
@@ -182,6 +182,55 @@ index d48a9f37c..9f96cefae 100644
    );
  });
  
+-- 
+2.43.0
+
+
+From 8a1b3840821432449e0454a61263255b7acd7cf9 Mon Sep 17 00:00:00 2001
+From: Michael Stock <mikeastock@gmail.com>
+Date: Thu, 27 Aug 2026 03:13:56 +0000
+Subject: [PATCH 3/3] fix(server): omit pnpm override selectors when packing
+ the CLI tarball
+
+npm pack rejects workspace override keys like @anthropic-ai/claude-agent-sdk>.
+Those selectors are only meaningful to pnpm publish, so leave them out of the
+GitHub release tarball.
+---
+ apps/server/scripts/cli.ts | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/apps/server/scripts/cli.ts b/apps/server/scripts/cli.ts
+index 802525cf4..e320fbca4 100644
+--- a/apps/server/scripts/cli.ts
++++ b/apps/server/scripts/cli.ts
+@@ -242,6 +242,7 @@ const publishCmd = Command.make(
+           const workspaceConfig = yield* readWorkspaceConfig();
+           const workspaceCatalog = workspaceConfig.catalog ?? {};
+           const workspaceOverrides = workspaceConfig.overrides ?? {};
++          const packing = Boolean(Option.getOrUndefined(config.packDestination)?.trim());
+           const pkg: PackageJson = {
+             name: serverPackageJson.name,
+             repository: serverPackageJson.repository,
+@@ -255,11 +256,14 @@ const publishCmd = Command.make(
+               workspaceCatalog,
+               "apps/server",
+             ),
+-            overrides: resolveCatalogDependencies(
+-              workspaceOverrides,
+-              workspaceCatalog,
+-              "apps/server",
+-            ),
++            // npm pack cannot parse pnpm override selectors such as `pkg>dep`.
++            overrides: packing
++              ? {}
++              : resolveCatalogDependencies(
++                  workspaceOverrides,
++                  workspaceCatalog,
++                  "apps/server",
++                ),
+           };
+ 
+           return {
 -- 
 2.43.0
 

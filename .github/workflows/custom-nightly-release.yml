@@ -90,6 +90,22 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-ff --no-edit refs/remotes/upstream/main
+
+          # GITHUB_TOKEN cannot push updates to workflow files. Drop those
+          # upstream changes so the rest of main can still sync.
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            [[ "$file" == ".github/workflows/custom-nightly-release.yml" ]] && continue
+            if git cat-file -e "origin/main:${file}" 2>/dev/null; then
+              git checkout origin/main -- "$file"
+            else
+              git rm -f "$file"
+            fi
+          done < <(git diff --name-only origin/main -- .github/workflows)
+          if ! git diff --cached --quiet -- .github/workflows; then
+            git commit -m "Keep fork copies of GitHub Actions workflow files"
+          fi
+
           git push origin HEAD:refs/heads/main
 
           {
