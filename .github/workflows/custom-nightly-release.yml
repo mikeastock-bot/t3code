@@ -38,8 +38,8 @@ env:
   BUNDLED_PATCHES: |
     .github/custom-patches/github-release-cli.patch
   # Extra fix branches, merged in this order after bundled patches.
+  # grok skill catalog landed upstream; keep this empty until a new fork-only fix.
   PATCH_BRANCHES: |
-    fix/grok-skill-catalog
 
 jobs:
   sync_upstream_main:
