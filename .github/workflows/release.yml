@@ -206,9 +206,6 @@ jobs:
       - name: Typecheck
         run: vp run typecheck
 
-      - name: Install browser secret helper build libraries
-        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
-
       - name: Test
         run: vp run test
 
@@ -506,13 +503,12 @@ jobs:
             exit $code
           }
 
-      - name: Install Linux desktop build libraries
+      - name: Install ImageMagick
         if: matrix.platform == 'linux'
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libsecret-1-dev pkg-config
           if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
+              sudo apt-get update
               sudo apt-get install -y imagemagick
           fi
 
