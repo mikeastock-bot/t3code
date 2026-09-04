@@ -176,6 +176,15 @@ export type ThreadFeedLatestTurn = Pick<
   "turnId" | "state" | "startedAt" | "completedAt"
 >;
 
+export function isContextCompactionActivityGroup(
+  entry: Extract<ThreadFeedEntry, { readonly type: "activity-group" }>,
+): boolean {
+  return (
+    entry.activities.length === 1 &&
+    entry.activities[0]?.workEntry.sourceActivityKind === "context-compaction"
+  );
+}
+
 function requestKindFromRequestType(requestType: unknown): PendingApproval["requestKind"] | null {
   switch (requestType) {
     case "command_execution_approval":
@@ -245,7 +254,7 @@ function parseUserInputQuestions(
           };
         })
         .filter((option): option is UserInputQuestion["options"][number] => option !== null);
-      if (options.length === 0) {
+      if (options.length === 0 && question.allowCustomAnswer === false) {
         return null;
       }
       return {
@@ -992,6 +1001,11 @@ function unwrapCommandRemainder(value: string, wrapperFlagPattern: RegExp): stri
     return null;
   }
 
+  const openingQuote = command[0];
+  if ((openingQuote === "'" || openingQuote === '"') && !command.endsWith(openingQuote)) {
+    return null;
+  }
+
   const unwrapped = trimMatchingOuterQuotes(command);
   return unwrapped.length > 0 ? unwrapped : null;
 }
@@ -1266,6 +1280,18 @@ function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): Th
       continue;
     }
 
+    if (entry.activity.workEntry.sourceActivityKind === "context-compaction") {
+      grouped.push({
+        type: "activity-group",
+        id: entry.id,
+        createdAt: entry.createdAt,
+        turnId: entry.turnId,
+        activities: [entry.activity],
+      });
+      openGroupActivities = null;
+      continue;
+    }
+
     if (openGroupActivities !== null && openGroupTurnId === entry.turnId) {
       openGroupActivities.push(entry.activity);
       continue;
@@ -1343,6 +1369,9 @@ function deriveThreadFeedTurnFolds(
   for (const entry of feed) {
     if (entry.type === "message" && entry.message.role === "user") {
       pendingUserBoundary = entry.message.createdAt;
+      continue;
+    }
+    if (entry.type === "activity-group" && isContextCompactionActivityGroup(entry)) {
       continue;
     }
     const turnId =
@@ -1501,6 +1530,10 @@ function appendPresentedFeedEntry(
   activeTail: boolean,
 ): void {
   if (entry.type !== "activity-group") {
+    result.push(entry);
+    return;
+  }
+  if (isContextCompactionActivityGroup(entry)) {
     result.push(entry);
     return;
   }
